@@ -61,9 +61,11 @@ class FastApiSseTransport(SseServerTransport):
             message = JSONRPCMessage.model_validate_json(body)
 
             # HACK to inject the HTTP request info into the MCP message,
-            # so we can use it for auth.
-            # It is then used in our custom `LowlevelMCPServer.call_tool()` decorator.
-            if hasattr(message.root, "params") and message.root.params is not None:
+            # so we can use it for auth and dynamic tool filtering.
+            # It is then used in our custom `LowlevelMCPServer` handlers.
+            if hasattr(message.root, "params"):
+                if message.root.params is None:
+                    message.root.params = {}
                 message.root.params["_http_request_info"] = HTTPRequestInfo(
                     method=request.method,
                     path=request.url.path,

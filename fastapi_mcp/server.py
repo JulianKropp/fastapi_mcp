@@ -19,6 +19,33 @@ logger = logging.getLogger(__name__)
 
 
 class LowlevelMCPServer(Server):
+    def list_tools(self):
+        """Same as the default list_tools but forwards HTTP request info."""
+
+        def decorator(func: Callable[..., Awaitable[List[types.Tool]]]):
+            logger.debug("Registering handler for ListToolsRequest")
+
+            async def handler(req: types.ListToolsRequest):
+                if (
+                    hasattr(req, "params")
+                    and req.params is not None
+                    and hasattr(req.params, "_http_request_info")
+                    and req.params._http_request_info is not None
+                ):
+                    http_request_info = HTTPRequestInfo.model_validate(
+                        req.params._http_request_info
+                    )
+                    tools = await func(http_request_info)
+                else:
+                    tools = await func()
+
+                return types.ServerResult(types.ListToolsResult(tools=tools))
+
+            self.request_handlers[types.ListToolsRequest] = handler
+            return func
+
+        return decorator
+
     def call_tool(self):
         """
         A near-direct copy of `mcp.server.lowlevel.server.Server.call_tool()`, except that it looks for
@@ -113,6 +140,12 @@ class FastApiMCP:
             Optional[AuthConfig],
             Doc("Configuration for MCP authentication"),
         ] = None,
+        list_tools_callback: Annotated[
+            Optional[Callable[[Optional[HTTPRequestInfo]], Awaitable[List[str]]]],
+            Doc(
+                "Callback returning the list of tool names allowed for a given request."
+            ),
+        ] = None,
     ):
         # Validate operation and tag filtering options
         if include_operations is not None and exclude_operations is not None:
@@ -137,6 +170,7 @@ class FastApiMCP:
         self._include_tags = include_tags
         self._exclude_tags = exclude_tags
         self._auth_config = auth_config
+        self._list_tools_callback = list_tools_callback
 
         if self._auth_config:
             self._auth_config = self._auth_config.model_validate(self._auth_config)
@@ -170,7 +204,13 @@ class FastApiMCP:
         mcp_server: LowlevelMCPServer = LowlevelMCPServer(self.name, self.description)
 
         @mcp_server.list_tools()
-        async def handle_list_tools() -> List[types.Tool]:
+        async def handle_list_tools(
+            http_request_info: Optional[HTTPRequestInfo] = None,
+        ) -> List[types.Tool]:
+            if self._list_tools_callback:
+                allowed = await self._list_tools_callback(http_request_info)
+                if allowed is not None:
+                    return [t for t in self.tools if t.name in allowed]
             return self.tools
 
         @mcp_server.call_tool()
@@ -530,3 +570,11 @@ class FastApiMCP:
             }
 
         return filtered_tools
+
+    def get_tool_route_map(self) -> Dict[str, Dict[str, str]]:
+        """Return a mapping of tool names to their HTTP method and path."""
+
+        return {
+            op_id: {"path": details["path"], "method": details["method"]}
+            for op_id, details in self.operation_map.items()
+        }
